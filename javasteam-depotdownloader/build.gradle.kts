@@ -136,7 +136,7 @@ publishing {
     repositories {
         maven {
             name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/joshuatam/JavaSteam")
+            url = uri("https://maven.pkg.github.com/AndreVto/JavaSteam")
             credentials {
                 username = project.findProperty("ossrhUsername") as String? ?: System.getenv("GITHUB_ACTOR")
                 password = project.findProperty("ossrhPassword") as String? ?: System.getenv("GITHUB_TOKEN")
