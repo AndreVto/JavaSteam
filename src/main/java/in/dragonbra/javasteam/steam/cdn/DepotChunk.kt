@@ -29,6 +29,30 @@ object DepotChunk {
      * @exception IllegalArgumentException Thrown if the destination size is too small or the depot key is not 32 bytes long
      */
     @JvmStatic
+    fun processDecrypted(info: ChunkData, compressed: ByteArray, destination: ByteArray): Int {
+        require(destination.size >= info.uncompressedLength)
+        require(compressed.size >= 4)
+        val written = when {
+            compressed[0] == 'V'.code.toByte() && compressed[1] == 'S'.code.toByte() &&
+                compressed[2] == 'Z'.code.toByte() && compressed[3] == 'a'.code.toByte() ->
+                VZstdUtil.decompress(compressed, destination, verifyChecksum = false)
+            compressed[0] == 'V'.code.toByte() && compressed[1] == 'Z'.code.toByte() &&
+                compressed[2] == 'a'.code.toByte() ->
+                MemoryStream(compressed).use { VZipUtil.decompress(it, destination, verifyChecksum = false) }
+            compressed[0] == 'P'.code.toByte() && compressed[1] == 'K'.code.toByte() &&
+                compressed[2] == 3.toByte() && compressed[3] == 4.toByte() ->
+                MemoryStream(compressed).use { ZipUtil.decompress(it, destination, verifyChecksum = false) }
+            else -> throw IOException("Unsupported Steam peer chunk compression")
+        }
+        if (written != info.uncompressedLength ||
+            Adler32.calculate(destination.copyOfRange(0, written)) != info.checksum
+        ) {
+            throw IOException("Steam peer chunk checksum mismatch")
+        }
+        return written
+    }
+
+    @JvmStatic
     fun process(
         info: ChunkData,
         data: ByteArray,

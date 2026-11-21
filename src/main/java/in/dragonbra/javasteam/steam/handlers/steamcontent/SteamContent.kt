@@ -4,6 +4,10 @@ import `in`.dragonbra.javasteam.base.IPacketMsg
 import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesContentsystemSteamclient.CContentServerDirectory_GetCDNAuthToken_Request
 import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesContentsystemSteamclient.CContentServerDirectory_GetManifestRequestCode_Request
 import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesContentsystemSteamclient.CContentServerDirectory_GetServersForSteamPipe_Request
+import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesContentsystemSteamclient.CContentServerDirectory_RequestPeerContentServer_Request
+import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesContentsystemSteamclient.CContentServerDirectory_RequestPeerContentServer_Response
+import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesContentsystemSteamclient.CContentServerDirectory_GetPeerContentInfo_Request
+import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesContentsystemSteamclient.CContentServerDirectory_GetPeerContentInfo_Response
 import `in`.dragonbra.javasteam.rpc.service.ContentServerDirectory
 import `in`.dragonbra.javasteam.steam.cdn.Server
 import `in`.dragonbra.javasteam.steam.handlers.ClientMsgHandler
@@ -116,6 +120,38 @@ class SteamContent : ClientMsgHandler() {
         val message = contentService.getCDNAuthToken(request).await()
 
         return@async CDNAuthToken(message)
+    }
+
+    fun requestPeerContentServer(
+        localClientId: Long,
+        accountSteamId: Long,
+        serverClientId: Long,
+        appId: Int,
+        currentBuildId: Int,
+        parentScope: CoroutineScope,
+    ): Deferred<CContentServerDirectory_RequestPeerContentServer_Response> = parentScope.async {
+        val request = CContentServerDirectory_RequestPeerContentServer_Request.newBuilder().apply {
+            remoteClientId = localClientId
+            steamid = accountSteamId
+            serverRemoteClientId = serverClientId
+            this.appId = appId
+            this.currentBuildId = currentBuildId
+        }.build()
+        contentService.requestPeerContentServer(request).await().body.build()
+    }
+
+    fun getPeerContentInfo(
+        localClientId: Long,
+        accountSteamId: Long,
+        serverClientId: Long,
+        parentScope: CoroutineScope,
+    ): Deferred<CContentServerDirectory_GetPeerContentInfo_Response> = parentScope.async {
+        val request = CContentServerDirectory_GetPeerContentInfo_Request.newBuilder().apply {
+            remoteClientId = localClientId
+            steamid = accountSteamId
+            serverRemoteClientId = serverClientId
+        }.build()
+        contentService.getPeerContentInfo(request).await().body.build()
     }
 
     /**

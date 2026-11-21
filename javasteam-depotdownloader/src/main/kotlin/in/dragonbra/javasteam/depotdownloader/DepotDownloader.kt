@@ -1,5 +1,7 @@
 package `in`.dragonbra.javasteam.depotdownloader
 
+import `in`.dragonbra.javasteam.depotdownloader.lan.SteamLanOptions
+import `in`.dragonbra.javasteam.depotdownloader.lan.SteamLanPeer
 import `in`.dragonbra.javasteam.depotdownloader.data.AppItem
 import `in`.dragonbra.javasteam.depotdownloader.data.DepotDownloadCounter
 import `in`.dragonbra.javasteam.depotdownloader.data.DepotDownloadInfo
@@ -126,6 +128,7 @@ class DepotDownloader @JvmOverloads constructor(
     private val autoStartDownload: Boolean = true,
     private val skipLargeFileAllocation: Boolean = false,
     private val filesystem: BaseCaseInsensitiveFileSystem = SimpleFileSystem(),
+    private val steamLan: SteamLanOptions? = null,
 ) : Closeable {
 
     companion object {
@@ -160,6 +163,7 @@ class DepotDownloader @JvmOverloads constructor(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob(parentJob))
 
     private var cdnClientPool: CDNClientPool? = null
+    private var peerSource: SteamLanPeer? = null
 
     private var config: Config = Config(androidEmulation = androidEmulation)
 
@@ -208,6 +212,7 @@ class DepotDownloader @JvmOverloads constructor(
         val fileStreamData: FileStreamData,
         val chunk: ChunkData,
         val fileId: String,
+        val peerPlaintext: Boolean = false,
     )
 
     private data class DirectoryResult(val success: Boolean, val installDir: Path?)
@@ -469,6 +474,15 @@ class DepotDownloader @JvmOverloads constructor(
                 val contentName = getAppName(appId)
                 throw DepotDownloaderException("App $appId ($contentName) is not available from this account.")
             }
+        }
+
+        peerSource?.close()
+        peerSource = null
+        val lanOptions = steamLan
+        if (!isUgc && lanOptions != null) {
+            peerSource = runCatching {
+                SteamLanPeer.open(steamClient, appId, scope, lanOptions)
+            }.onFailure { lanOptions.onEvent("[steam-lan] initialization failed; using CDN") }.getOrNull()
         }
 
         val hasSpecificDepots = depotManifestIds.isNotEmpty()
@@ -1457,8 +1471,10 @@ class DepotDownloader @JvmOverloads constructor(
 
         var downloaded = 0
         val chunkBuffer = ByteArray(chunk.compressedLength)
+        val peerPlaintext = peerSource?.fetch(depot.depotId, chunk)
+        if (peerPlaintext != null) downloaded = peerPlaintext.size
 
-        do {
+        while (downloaded == 0) {
             ensureActive()
 
             var connection: Server? = null
@@ -1525,7 +1541,7 @@ class DepotDownloader @JvmOverloads constructor(
                 cdnClientPool!!.returnBrokenConnection(connection)
                 logger?.error("Encountered unexpected error downloading chunk $chunkID", e)
             }
-        } while (downloaded == 0)
+        }
 
         if (downloaded == 0) {
             logger?.error("Failed to find any server with chunk $chunkID for depot ${depot.depotId}. Aborting.")
@@ -1542,7 +1558,8 @@ class DepotDownloader @JvmOverloads constructor(
 
         // Save the uncompressed chunk data to temporary file
         filesystem.sink(chunkTempPath).buffer().use { sink ->
-            sink.write(chunkBuffer, 0, downloaded)
+            if (peerPlaintext != null) sink.write(peerPlaintext)
+            else sink.write(chunkBuffer, 0, downloaded)
         }
 
         logger?.debug("Saved uncompressed chunk $chunkID to $chunkTempPath")
@@ -1556,6 +1573,7 @@ class DepotDownloader @JvmOverloads constructor(
             fileStreamData = fileStreamData,
             chunk = chunk,
             fileId = fileId,
+            peerPlaintext = peerPlaintext != null,
         )
 
         // Emit to decompression flow
@@ -1815,7 +1833,9 @@ class DepotDownloader @JvmOverloads constructor(
             }
 
             // Decompress the chunk if we have a depot key
-            val decompressedChunkBuffer = if (depotKey != null) {
+            val decompressedChunkBuffer = if (item.peerPlaintext) {
+                ByteBuffer.wrap(chunkBuffer)
+            } else if (depotKey != null) {
                 val decompressed = ByteArray(chunk.uncompressedLength)
                 DepotChunk.process(chunk, chunkBuffer, decompressed, depotKey)
                 ByteBuffer.wrap(decompressed)
@@ -1933,6 +1953,8 @@ class DepotDownloader @JvmOverloads constructor(
 
         cdnClientPool?.close()
         cdnClientPool = null
+        peerSource?.close()
+        peerSource = null
 
         logger = null
     }
