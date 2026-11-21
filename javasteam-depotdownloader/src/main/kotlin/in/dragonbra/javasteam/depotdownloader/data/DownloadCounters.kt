@@ -12,6 +12,8 @@ import java.util.concurrent.atomic.AtomicLong
  * @property completeDownloadSize Total bytes expected to download across all depots. Adjusted during validation when existing chunks are reused.
  * @property totalBytesCompressed Total compressed bytes transferred from CDN servers
  * @property totalBytesUncompressed Total uncompressed bytes written to disk
+ * @property totalInstallBytes Total installed file bytes selected across all depots
+ * @property completedInstallBytes Installed bytes already validated or successfully written
  *
  * @author Oxters
  * @author Lossy
@@ -21,7 +23,19 @@ class GlobalDownloadCounter(
     val completeDownloadSize: AtomicLong = AtomicLong(0),
     val totalBytesCompressed: AtomicLong = AtomicLong(0),
     val totalBytesUncompressed: AtomicLong = AtomicLong(0),
-)
+    val totalInstallBytes: AtomicLong = AtomicLong(0),
+    val completedInstallBytes: AtomicLong = AtomicLong(0),
+) {
+    fun recordCompleted(bytes: Long): Pair<Long, Long> {
+        require(bytes >= 0L)
+        val completed = completedInstallBytes.addAndGet(bytes)
+        val total = totalInstallBytes.get()
+        return completed.coerceAtMost(total) to total
+    }
+
+    fun currentProgress(): Pair<Long, Long> =
+        completedInstallBytes.get().coerceAtMost(totalInstallBytes.get()) to totalInstallBytes.get()
+}
 
 /**
  * Tracks download statistics for a single depot.
@@ -42,4 +56,10 @@ data class DepotDownloadCounter(
     var sizeDownloaded: AtomicLong = AtomicLong(0),
     var depotBytesCompressed: AtomicLong = AtomicLong(0),
     var depotBytesUncompressed: AtomicLong = AtomicLong(0),
-)
+) {
+    fun progressFraction(): Float {
+        val total = completeDownloadSize.get()
+        return if (total == 0L) 1f else
+            (sizeDownloaded.get().toDouble() / total.toDouble()).toFloat().coerceIn(0f, 1f)
+    }
+}

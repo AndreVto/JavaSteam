@@ -60,6 +60,13 @@ interface IDownloadListener {
     fun onChunkCompleted(depotId: Int, depotPercentComplete: Float, compressedBytes: Long, uncompressedBytes: Long) {}
 
     /**
+     * Called when installation progress changes across all selected depots.
+     * The total is fixed after manifest selection and file deduplication.
+     * Completed bytes include validated existing content and successfully written chunks.
+     */
+    fun onDownloadProgress(completedBytes: Long, totalBytes: Long) {}
+
+    /**
      * Called when a depot finishes downloading.
      * Use this for printing summary like "Depot 228990 - Downloaded X bytes (Y bytes uncompressed)"
      *

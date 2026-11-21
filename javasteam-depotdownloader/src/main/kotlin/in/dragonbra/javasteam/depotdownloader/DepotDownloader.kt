@@ -37,6 +37,7 @@ import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.HttpHeaders
 import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
@@ -157,6 +158,7 @@ class DepotDownloader @JvmOverloads constructor(
     private val httpClient: HttpClient by lazy { HttpClient(maxConnections = maxDownloads) }
 
     private val listeners = CopyOnWriteArrayList<IDownloadListener>()
+    private val listenerEvents = Channel<() -> Unit>(Channel.UNLIMITED)
 
     private val progressUpdateInterval = 500L // ms
 
@@ -237,6 +239,16 @@ class DepotDownloader @JvmOverloads constructor(
     // endregion
 
     init {
+        scope.launch {
+            for (callback in listenerEvents) {
+                try {
+                    callback()
+                } catch (e: Exception) {
+                    logger?.error("Download listener callback failed: ${e.message}", e)
+                }
+            }
+        }
+
         if (debug) {
             logger = LogManager.getLogger(DepotDownloader::class.java)
         }
@@ -943,6 +955,17 @@ class DepotDownloader @JvmOverloads constructor(
             }
         }
 
+        val totalInstallBytes = depotsToDownload.sumOf { depotData ->
+            val depotTotal = depotData.filteredFiles.sumOf { file ->
+                if (file.flags.contains(EDepotFileFlag.Directory)) 0L else file.totalSize
+            }
+            depotData.depotCounter.completeDownloadSize.set(depotTotal)
+            depotTotal
+        }
+        downloadCounter.completeDownloadSize.set(totalInstallBytes)
+        downloadCounter.totalInstallBytes.set(totalInstallBytes)
+        reportInstallProgress(downloadCounter)
+
         if (depotsToDownload.isEmpty()) {
             finishDepotDownload(mainAppId)
         } else {
@@ -970,6 +993,14 @@ class DepotDownloader @JvmOverloads constructor(
         )
 
         finishDepotDownload(mainAppId)
+    }
+
+    private fun reportInstallProgress(downloadCounter: GlobalDownloadCounter, completedBytes: Long = 0L) {
+        downloadCounter.recordCompleted(completedBytes)
+        notifyListeners { listener ->
+            val (completed, total) = downloadCounter.currentProgress()
+            listener.onDownloadProgress(completed, total)
+        }
     }
 
     private suspend fun processDepotManifestAndFiles(
@@ -1372,6 +1403,7 @@ class DepotDownloader @JvmOverloads constructor(
                 logger?.debug("File $fileFinalPath already exists and matches hash, skipping download")
 
                 depotDownloadCounter.sizeDownloaded.addAndGet(file.totalSize)
+                reportInstallProgress(downloadCounter, file.totalSize)
 
                 val percentage =
                     (depotDownloadCounter.sizeDownloaded.get() / depotDownloadCounter.completeDownloadSize.toFloat()) * 100.0f
@@ -1384,8 +1416,9 @@ class DepotDownloader @JvmOverloads constructor(
                 logger?.debug("File $fileFinalPath does not match hash, downloading")
             }
 
-            val sizeOnDisk = file.totalSize - neededChunks!!.sumOf { it.uncompressedLength }
+            val sizeOnDisk = (file.totalSize - neededChunks!!.sumOf { it.uncompressedLength }).coerceAtLeast(0L)
             depotDownloadCounter.sizeDownloaded.addAndGet(sizeOnDisk)
+            reportInstallProgress(downloadCounter, sizeOnDisk)
             downloadCounter.completeDownloadSize.addAndGet(-sizeOnDisk)
         }
 
@@ -1598,7 +1631,7 @@ class DepotDownloader @JvmOverloads constructor(
         return false
     }
 
-    private fun finishDepotDownload(appId: Int) {
+    private suspend fun finishDepotDownload(appId: Int) {
         val appItem = processingItemsMap[appId]
         if (appItem != null) {
             notifyListeners { it.onDownloadCompleted(appItem) }
@@ -1606,6 +1639,9 @@ class DepotDownloader @JvmOverloads constructor(
         }
 
         if (processingItemsMap.isEmpty()) {
+            val drained = CompletableDeferred<Unit>()
+            listenerEvents.send { drained.complete(Unit) }
+            drained.await()
             completionFuture.complete(null)
         }
     }
@@ -1623,7 +1659,7 @@ class DepotDownloader @JvmOverloads constructor(
     }
 
     private fun notifyListeners(action: (IDownloadListener) -> Unit) {
-        scope.launch(Dispatchers.IO) {
+        listenerEvents.trySend {
             listeners.forEach { listener -> action(listener) }
         }
     }
@@ -1866,21 +1902,21 @@ class DepotDownloader @JvmOverloads constructor(
             val totalCompressedBytes = chunk.compressedLength.toLong()
             val totalUncompressedBytes = chunk.uncompressedLength.toLong()
 
-            val sizeDownloaded = depotDownloadCounter.sizeDownloaded.addAndGet(totalCompressedBytes)
-            val totalBytesCompressed = depotDownloadCounter.depotBytesCompressed.addAndGet(totalCompressedBytes)
-            val totalBytesUncompressed = depotDownloadCounter.depotBytesUncompressed.addAndGet(totalUncompressedBytes)
+            depotDownloadCounter.sizeDownloaded.addAndGet(totalUncompressedBytes)
+            depotDownloadCounter.depotBytesCompressed.addAndGet(totalCompressedBytes)
+            depotDownloadCounter.depotBytesUncompressed.addAndGet(totalUncompressedBytes)
 
             downloadCounter.totalBytesCompressed.addAndGet(totalCompressedBytes)
             downloadCounter.totalBytesUncompressed.addAndGet(totalUncompressedBytes)
 
-            val depotPercentage = (sizeDownloaded.toFloat() / depotDownloadCounter.completeDownloadSize.get())
+            reportInstallProgress(downloadCounter, totalUncompressedBytes)
 
             notifyListeners { listener ->
                 listener.onChunkCompleted(
                     depotId = depot.depotId,
-                    depotPercentComplete = depotPercentage,
-                    compressedBytes = totalBytesCompressed,
-                    uncompressedBytes = totalBytesUncompressed
+                    depotPercentComplete = depotDownloadCounter.progressFraction(),
+                    compressedBytes = depotDownloadCounter.depotBytesCompressed.get(),
+                    uncompressedBytes = depotDownloadCounter.depotBytesUncompressed.get()
                 )
             }
 
@@ -1893,11 +1929,11 @@ class DepotDownloader @JvmOverloads constructor(
                     listener.onFileCompleted(
                         depotId = depot.depotId,
                         fileName = fileFinalPath.toString(),
-                        depotPercentComplete = 1.0f
+                        depotPercentComplete = depotDownloadCounter.progressFraction()
                     )
                 }
 
-                logger?.debug("%.2f%% %s".format(1.0f, fileFinalPath))
+                logger?.debug("%.2f%% %s".format(depotDownloadCounter.progressFraction() * 100f, fileFinalPath))
 
                 // Remove cache entries for completed file from filesystem
                 filesystem.removeFileCache(fileFinalPath)
@@ -1937,6 +1973,7 @@ class DepotDownloader @JvmOverloads constructor(
 
     override fun close() {
         processingChannel.close()
+        listenerEvents.close()
 
         scope.cancel("DepotDownloader Closing")
 
