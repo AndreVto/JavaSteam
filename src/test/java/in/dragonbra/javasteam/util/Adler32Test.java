@@ -67,6 +67,31 @@ public class Adler32Test {
         Assertions.assertEquals(expected, actual);
     }
 
+    @Test
+    void calculatesRangesWithoutChangingTheSeed() {
+        var data = new byte[12_000];
+        new Random(37).nextBytes(data);
+        for (int seed : new int[]{0, 1, 0x12345678}) {
+            for (int length : new int[]{0, 1, 15, 16, 17, 5552, 5553, 10_000}) {
+                var slice = Arrays.copyOfRange(data, 5, 5 + length);
+                Assertions.assertEquals(Adler32.calculate(seed, slice), Adler32.calculate(seed, data, 5, length));
+                if (seed == 0) {
+                    Assertions.assertEquals(Adler32.calculate(slice), Adler32.calculate(data, 5, length));
+                }
+            }
+        }
+        Assertions.assertEquals(0, Adler32.calculate(data, 5, 0));
+        Assertions.assertEquals(1, Adler32.calculate(1, data, 5, 0));
+    }
+
+    @Test
+    void rejectsInvalidRanges() {
+        var data = new byte[8];
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Adler32.calculate(data, -1, 1));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Adler32.calculate(data, 0, -1));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Adler32.calculate(data, 5, 4));
+    }
+
     // Additional benchmarking
 
     @SuppressWarnings("ResultOfMethodCallIgnored")

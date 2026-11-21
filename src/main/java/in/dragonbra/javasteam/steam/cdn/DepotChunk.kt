@@ -45,7 +45,7 @@ object DepotChunk {
             else -> throw IOException("Unsupported Steam peer chunk compression")
         }
         if (written != info.uncompressedLength ||
-            Adler32.calculate(destination.copyOfRange(0, written)) != info.checksum
+            Adler32.calculate(destination, 0, written) != info.checksum
         ) {
             throw IOException("Steam peer chunk checksum mismatch")
         }
@@ -100,7 +100,8 @@ object DepotChunk {
             ) {
                 // Zstd
                 writtenDecompressed = VZstdUtil.decompress(
-                    buffer = buffer.copyOfRange(0, written),
+                    buffer = buffer,
+                    length = written,
                     destination = destination,
                     verifyChecksum = false,
                 )
@@ -151,7 +152,7 @@ object DepotChunk {
             )
         }
 
-        val dataCrc = Adler32.calculate(destination.sliceArray(0 until writtenDecompressed))
+        val dataCrc = Adler32.calculate(destination, 0, writtenDecompressed)
 
         if (dataCrc != info.checksum) {
             throw IOException("Processed data checksum is incorrect ($dataCrc != ${info.checksum})! Downloaded depot chunk is corrupt or invalid/wrong depot key?")

@@ -12,6 +12,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.net.InetAddress;
+import java.util.Arrays;
+import okio.Buffer;
+import okio.BufferedSource;
 import java.util.concurrent.ExecutionException;
 
 /**
@@ -148,6 +151,67 @@ public class CDNClientTest {
             // JVM doesn't have a paramName for exception checking, so we'll check if the message contains something about the destination.
             Assertions.assertTrue(exception.getMessage().toLowerCase().contains("destination"));
         }
+    }
+
+    @Test
+    void downloadsExactChunkIntoProvidedBuffer() throws Exception {
+        var payload = new byte[]{1, 2, 3, 4, 5};
+        var destination = new byte[payload.length];
+        try (var client = chunkClient(payload, payload.length)) {
+            var chunk = new ChunkData(new byte[]{1}, 0, 0, payload.length, payload.length);
+            var bytes = client.downloadDepotChunkFuture(1, chunk, Server.fromHostAndPort("localhost", 80), destination).get();
+            Assertions.assertEquals(payload.length, bytes);
+            Assertions.assertArrayEquals(payload, destination);
+        }
+    }
+
+    @Test
+    void downloadsChunkWithUnknownContentLength() throws Exception {
+        var payload = new byte[]{1, 2, 3};
+        var destination = new byte[payload.length];
+        try (var client = chunkClient(payload, -1)) {
+            var chunk = new ChunkData(new byte[]{1}, 0, 0, payload.length, payload.length);
+            var bytes = client.downloadDepotChunkFuture(1, chunk, Server.fromHostAndPort("localhost", 80), destination).get();
+            Assertions.assertEquals(payload.length, bytes);
+            Assertions.assertArrayEquals(payload, destination);
+        }
+    }
+
+    @Test
+    void rejectsTruncatedAndOversizedChunkBodies() {
+        var chunk = new ChunkData(new byte[]{1}, 0, 0, 3, 3);
+        for (var payload : Arrays.asList(new byte[]{1, 2}, new byte[]{1, 2, 3, 4})) {
+            try (var client = chunkClient(payload, 3)) {
+                var error = Assertions.assertThrows(ExecutionException.class, () ->
+                        client.downloadDepotChunkFuture(1, chunk, Server.fromHostAndPort("localhost", 80), new byte[3]).get());
+                Assertions.assertInstanceOf(SteamKitWebRequestException.class, error.getCause());
+            }
+        }
+    }
+
+    @Test
+    void rejectsMismatchedDeclaredChunkLength() {
+        var chunk = new ChunkData(new byte[]{1}, 0, 0, 3, 3);
+        try (var client = chunkClient(new byte[]{1, 2, 3, 4}, 4)) {
+            var error = Assertions.assertThrows(ExecutionException.class, () ->
+                    client.downloadDepotChunkFuture(1, chunk, Server.fromHostAndPort("localhost", 80), new byte[3]).get());
+            Assertions.assertInstanceOf(SteamKitWebRequestException.class, error.getCause());
+        }
+    }
+
+    private Client chunkClient(byte[] payload, long reportedLength) {
+        var httpClient = new OkHttpClient.Builder().addInterceptor(chain -> {
+            ResponseBody body = new ResponseBody() {
+                @Override public MediaType contentType() { return null; }
+                @Override public long contentLength() { return reportedLength; }
+                @Override public BufferedSource source() {
+                    return new Buffer().write(payload);
+                }
+            };
+            return new Response.Builder().code(200).protocol(Protocol.HTTP_1_1)
+                    .message("OK").request(chain.request()).body(body).build();
+        }).build();
+        return new Client(new SteamClient(SteamConfiguration.create(x -> x.withHttpClient(httpClient))));
     }
 
     @ParameterizedTest

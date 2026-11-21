@@ -16,8 +16,15 @@ object VZstdUtil {
     @Throws(IOException::class, IllegalArgumentException::class)
     @JvmStatic
     @JvmOverloads
-    fun decompress(buffer: ByteArray, destination: ByteArray, verifyChecksum: Boolean = false): Int {
-        val byteBuffer = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN) // Convert the buffer.
+    fun decompress(buffer: ByteArray, destination: ByteArray, verifyChecksum: Boolean = false): Int =
+        decompress(buffer, buffer.size, destination, verifyChecksum)
+
+    @Throws(IOException::class, IllegalArgumentException::class)
+    @JvmStatic
+    @JvmOverloads
+    fun decompress(buffer: ByteArray, length: Int, destination: ByteArray, verifyChecksum: Boolean = false): Int {
+        require(length >= 23 && length <= buffer.size) { "Invalid VZstd stream length" }
+        val byteBuffer = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
 
         val header = byteBuffer.getInt(0)
         if (header != VZSTD_HEADER) {
@@ -25,17 +32,17 @@ object VZstdUtil {
         }
 
         val crc32 = byteBuffer.getInt(4)
-        val crc32Footer = byteBuffer.getInt(buffer.size - 15)
-        val sizeDecompressed = byteBuffer.getInt(buffer.size - 11)
+        val crc32Footer = byteBuffer.getInt(length - 15)
+        val sizeDecompressed = byteBuffer.getInt(length - 11)
 
         if (crc32 == crc32Footer) {
             // They write CRC32 twice?
             // logger.debug("CRC32 appears to be written twice in the data")
         }
 
-        if (buffer[buffer.size - 3] != 'z'.code.toByte() ||
-            buffer[buffer.size - 2] != 's'.code.toByte() ||
-            buffer[buffer.size - 1] != 'v'.code.toByte()
+        if (buffer[length - 3] != 'z'.code.toByte() ||
+            buffer[length - 2] != 's'.code.toByte() ||
+            buffer[length - 1] != 'v'.code.toByte()
         ) {
             throw IOException("Expecting VZstdFooter at end of stream")
         }
@@ -44,10 +51,8 @@ object VZstdUtil {
             throw IllegalArgumentException("The destination buffer is smaller than the decompressed data size.")
         }
 
-        val compressedData = buffer.copyOfRange(8, buffer.size - 15)
-
         try {
-            val bytesDecompressed = Zstd.decompress(destination, compressedData)
+            val bytesDecompressed = Zstd.decompressByteArray(destination, 0, destination.size, buffer, 8, length - 23)
 
             if (bytesDecompressed != sizeDecompressed.toLong()) {
                 throw IOException("Failed to decompress Zstd (expected $sizeDecompressed bytes, got $bytesDecompressed).")

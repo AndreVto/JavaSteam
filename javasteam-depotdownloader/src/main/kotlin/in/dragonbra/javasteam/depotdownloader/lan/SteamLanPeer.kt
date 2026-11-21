@@ -257,7 +257,9 @@ class SteamLanPeer private constructor(
                 answer.data
             }
             require(plain.size == chunk.uncompressedLength)
-            require(`in`.dragonbra.javasteam.util.Adler32.calculate(plain) == chunk.checksum)
+            if (!answer.compressed) {
+                require(`in`.dragonbra.javasteam.util.Adler32.calculate(plain) == chunk.checksum)
+            }
             require(MessageDigest.getInstance("SHA-1").digest(plain).contentEquals(sha))
             failures.set(0)
             completedChunks.incrementAndGet()

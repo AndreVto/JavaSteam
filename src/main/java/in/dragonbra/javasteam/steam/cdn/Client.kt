@@ -230,39 +230,40 @@ class Client(steamClient: SteamClient) : Closeable {
                     )
                 }
 
-                var contentLength = chunk.compressedLength
-
-                if (resp.body.contentLength().toInt() > 0) {
-                    contentLength = resp.body.contentLength().toInt()
-
-                    // assert that lengths match only if the chunk has a length assigned.
-                    if (chunk.compressedLength > 0 && contentLength != chunk.compressedLength) {
-                        throw SteamKitWebRequestException(
-                            "Content-Length mismatch for depot chunk! (was $contentLength, but should be ${chunk.compressedLength})"
-                        )
-                    }
-                } else if (contentLength > 0) {
+                val contentLength = chunk.compressedLength
+                val reportedLength = resp.body.contentLength()
+                if (reportedLength > 0 && reportedLength != contentLength.toLong()) {
+                    throw SteamKitWebRequestException(
+                        "Content-Length mismatch for depot chunk! (was $reportedLength, but should be $contentLength)"
+                    )
+                } else if (reportedLength <= 0 && contentLength > 0) {
                     logger.debug("Response does not have Content-Length, falling back to chunk.CompressedLength.")
-                } else {
+                } else if (contentLength <= 0) {
                     throw SteamKitWebRequestException(
                         "Response does not have Content-Length and chunk.CompressedLength is not set.",
                         response
                     )
                 }
 
-                val responseBody = resp.body.bytes()
-
-                if (responseBody.isEmpty()) {
+                val input = resp.body.byteStream()
+                var received = 0
+                while (received < contentLength) {
+                    val count = input.read(destination, received, contentLength - received)
+                    if (count < 0) break
+                    if (count == 0) continue
+                    received += count
+                }
+                if (received == 0) {
                     throw SteamKitWebRequestException("Response is empty")
                 }
-
-                if (responseBody.size != contentLength) {
+                if (received != contentLength) {
                     throw SteamKitWebRequestException(
-                        "Length mismatch after downloading depot chunk! (was ${responseBody.size}, but should be $contentLength)"
+                        "Length mismatch after downloading depot chunk! (was $received, but should be $contentLength)"
                     )
                 }
-
-                System.arraycopy(responseBody, 0, destination, 0, contentLength)
+                if (input.read() != -1) {
+                    throw SteamKitWebRequestException("Depot chunk response exceeds expected length $contentLength")
+                }
                 return@withContext contentLength
             }
         } catch (e: Exception) {

@@ -1129,10 +1129,9 @@ class DepotDownloader @JvmOverloads constructor(
 
         val stagingDir = depot.installDir / STAGING_DIR
 
-        val filesAfterExclusions = coroutineScope {
-            newManifest.files.filter { file ->
-                async { testIsFileIncluded(file.fileName) }.await()
-            }
+        val filesAfterExclusions = newManifest.files.filterIndexed { index, file ->
+            if (index % 50 == 0) ensureActive()
+            testIsFileIncluded(file.fileName)
         }
         val allFileNames = HashSet<String>(filesAfterExclusions.size)
 
@@ -1469,10 +1468,9 @@ class DepotDownloader @JvmOverloads constructor(
 
         val chunkID = Strings.toHex(chunk.chunkID)
 
-        var downloaded = 0
-        val chunkBuffer = ByteArray(chunk.compressedLength)
-        val peerPlaintext = peerSource?.fetch(depot.depotId, chunk)
-        if (peerPlaintext != null) downloaded = peerPlaintext.size
+        val peerPlaintext = peerSource?.fetch(depot.depotId, chunk)?.takeIf { it.isNotEmpty() }
+        val chunkBuffer = if (peerPlaintext == null) ByteArray(chunk.compressedLength) else null
+        var downloaded = peerPlaintext?.size ?: 0
 
         while (downloaded == 0) {
             ensureActive()
@@ -1501,7 +1499,7 @@ class DepotDownloader @JvmOverloads constructor(
                     depotId = depot.depotId,
                     chunk = chunk,
                     server = connection,
-                    destination = chunkBuffer,
+                    destination = requireNotNull(chunkBuffer),
                     depotKey = depot.depotKey,
                     proxyServer = cdnClientPool!!.proxyServer,
                     cdnAuthToken = cdnToken,
@@ -1559,7 +1557,7 @@ class DepotDownloader @JvmOverloads constructor(
         // Save the uncompressed chunk data to temporary file
         filesystem.sink(chunkTempPath).buffer().use { sink ->
             if (peerPlaintext != null) sink.write(peerPlaintext)
-            else sink.write(chunkBuffer, 0, downloaded)
+            else sink.write(requireNotNull(chunkBuffer), 0, downloaded)
         }
 
         logger?.debug("Saved uncompressed chunk $chunkID to $chunkTempPath")
@@ -1820,7 +1818,7 @@ class DepotDownloader @JvmOverloads constructor(
         val chunk = item.chunk
         val chunkTempDir = depot.installDir / STAGING_DIR / "chunks" / item.fileId
 
-        val writeOffset = file.chunks.filter { it.offset < chunk.offset }.sumOf { it.uncompressedLength.toLong() }
+        val writeOffset = chunk.offset
 
         try {
             logger?.debug("Processing chunk $chunkID for file ${file.fileName}")
@@ -1886,7 +1884,7 @@ class DepotDownloader @JvmOverloads constructor(
                 )
             }
 
-            val remainingDownloads = item.fileStreamData.chunksDownloaded.decrementAndGet()
+            val remainingDownloads = item.fileStreamData.chunksToDownload.decrementAndGet()
 
             if (remainingDownloads == 0) {
                 logger?.debug("File ${file.fileName} successfully finalized")
