@@ -14,6 +14,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -22,6 +24,9 @@ import java.io.ByteArrayInputStream
 import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipInputStream
 
 /**
@@ -30,7 +35,7 @@ import java.util.zip.ZipInputStream
  * @param steamClient The [SteamClient] this instance will be associated with.
  * The SteamClient instance must be connected and logged onto Steam.
  */
-class Client(steamClient: SteamClient) : Closeable {
+class Client @JvmOverloads constructor(steamClient: SteamClient, private val collectDiagnostics: Boolean = false) : Closeable {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -83,7 +88,29 @@ class Client(steamClient: SteamClient) : Closeable {
         }
     }
 
-    private val httpClient: OkHttpClient = steamClient.configuration.httpClient
+    private class HostMetrics {
+        val successes = AtomicLong()
+        val failures = AtomicLong()
+        val bytes = AtomicLong()
+        val elapsedNanos = AtomicLong()
+    }
+
+    private val hostMetrics = ConcurrentHashMap<String, HostMetrics>()
+
+    private val httpClient: OkHttpClient = steamClient.configuration.httpClient.newBuilder()
+        .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
+        .dispatcher(Dispatcher().apply {
+            maxRequests = 64
+            maxRequestsPerHost = 16
+        })
+        .build()
+
+    fun diagnosticSummary(): List<String> = hostMetrics.entries.sortedByDescending { it.value.bytes.get() }.map { (host, metrics) ->
+        val seconds = metrics.elapsedNanos.get() / 1_000_000_000.0
+        val mibPerSecond = if (seconds > 0.0) metrics.bytes.get() / (1024.0 * 1024.0 * seconds) else 0.0
+        "CDN $host chunks=${metrics.successes.get()} failures=${metrics.failures.get()} " +
+            "bytes=${metrics.bytes.get()} average_chunk_MiBps=${"%.2f".format(java.util.Locale.ROOT, mibPerSecond)}"
+    }
 
     /**
      * Disposes of this object.
@@ -219,6 +246,7 @@ class Client(steamClient: SteamClient) : Closeable {
                 .build()
         }
 
+        val startedNanos = if (collectDiagnostics) System.nanoTime() else 0L
         try {
             val response = httpClient.newCall(request).executeAsync()
 
@@ -264,9 +292,17 @@ class Client(steamClient: SteamClient) : Closeable {
                 if (input.read() != -1) {
                     throw SteamKitWebRequestException("Depot chunk response exceeds expected length $contentLength")
                 }
+                if (collectDiagnostics) {
+                    hostMetrics.computeIfAbsent(request.url.host) { HostMetrics() }.apply {
+                        successes.incrementAndGet()
+                        bytes.addAndGet(contentLength.toLong())
+                        elapsedNanos.addAndGet(System.nanoTime() - startedNanos)
+                    }
+                }
                 return@withContext contentLength
             }
         } catch (e: Exception) {
+            if (collectDiagnostics) hostMetrics.computeIfAbsent(request.url.host) { HostMetrics() }.failures.incrementAndGet()
             logger.error("Failed to download a depot chunk ${request.url}: ${e.message}", e)
             throw e
         }

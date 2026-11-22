@@ -7,8 +7,6 @@ import `in`.dragonbra.javasteam.util.log.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Manages a pool of CDN server connections for efficient content downloading.
@@ -30,13 +28,12 @@ class CDNClientPool(
     private val appId: Int,
     private val scope: CoroutineScope,
     debug: Boolean = false,
+    private val preferredHostCount: Int = 8,
 ) : AutoCloseable {
 
     private var logger: Logger? = null
 
-    private val servers = AtomicReference<List<Server>>(emptyList())
-
-    private var nextServer: AtomicInteger = AtomicInteger(0)
+    private val selector = CdnServerSelector(preferredCount = preferredHostCount)
 
     private val mutex: Mutex = Mutex()
 
@@ -47,7 +44,7 @@ class CDNClientPool(
         private set
 
     init {
-        cdnClient = Client(steamSession.steamClient)
+        cdnClient = Client(steamSession.steamClient, collectDiagnostics = true)
 
         if (debug) {
             logger = LogManager.getLogger(CDNClientPool::class.java)
@@ -57,8 +54,8 @@ class CDNClientPool(
     override fun close() {
         logger?.debug("Closing...")
 
-        servers.set(emptyList())
-
+        cdnClient?.diagnosticSummary()?.forEach { println("[steam-cdn-region] app=$appId $it") }
+        cdnClient?.close()
         cdnClient = null
         proxyServer = null
 
@@ -67,8 +64,9 @@ class CDNClientPool(
 
     @Throws(Exception::class)
     suspend fun updateServerList(maxNumServers: Int? = null) = mutex.withLock {
+        val clientCellId = steamSession.steamClient.cellID ?: 0
         val serversForSteamPipe = steamSession.steamContent!!.getServersForSteamPipe(
-            cellId = steamSession.steamClient.cellID ?: 0,
+            cellId = clientCellId,
             maxNumServers = maxNumServers,
             parentScope = scope
         ).await()
@@ -81,31 +79,41 @@ class CDNClientPool(
                 isEligibleForApp && (server.type == "SteamCache" || server.type == "CDN")
             }
             .sortedBy { it.weightedLoad }
+            .distinctBy { Triple(it.protocol, it.vHost ?: it.host, it.port) }
 
-        // ContentServerPenalty removed for now.
+        val orderedServers = CdnRegionPreference.prioritize(
+            weightedCdnServers, clientCellId, preferredHostCount,
+        ) { it.cellId }
+        selector.update(orderedServers)
 
-        servers.set(weightedCdnServers)
-
-        nextServer.set(0)
-
-        // servers.joinToString(separator = "\n", prefix = "Servers:\n") { "- $it" }
-        logger?.debug("Found ${weightedCdnServers.size} Servers")
+        val matchingCellCount = weightedCdnServers.count { clientCellId > 0 && it.cellId == clientCellId }
+        val matchingInWindow = weightedCdnServers
+            .take(maxOf(8, preferredHostCount * 2))
+            .count { clientCellId > 0 && it.cellId == clientCellId }
+        val country = steamSession.steamClient.ipCountryCode ?: "unknown"
+        println(
+            "[steam-cdn-region] app=$appId country=$country clientCell=$clientCellId " +
+                "returned=${serversForSteamPipe.size} eligible=${orderedServers.size} " +
+                "matchingCell=$matchingCellCount matchingInWindow=$matchingInWindow " +
+                "preferredHosts=${minOf(preferredHostCount, orderedServers.size)} " +
+                "mode=${if (matchingInWindow > 0) "cell-match" else "steam-weighted-load"}"
+        )
+        orderedServers.take(24).forEachIndexed { index, server ->
+            println(
+                "[steam-cdn-region] rank=${index + 1} tier=${if (index < preferredHostCount) "preferred" else "reserve"} " +
+                    "host=${server.vHost ?: server.host} cell=${server.cellId} " +
+                    "sameCell=${clientCellId > 0 && server.cellId == clientCellId} " +
+                    "weightedLoad=${server.weightedLoad} type=${server.type}"
+            )
+        }
+        logger?.debug("Found ${orderedServers.size} Servers")
 
         if (weightedCdnServers.isEmpty()) {
             throw Exception("Failed to retrieve any download servers.")
         }
     }
 
-    fun getConnection(): Server {
-        val servers = servers.get()
-
-        val index = nextServer.getAndIncrement()
-        val server = servers[index % servers.size]
-
-        logger?.debug("Getting connection $server")
-
-        return server
-    }
+    fun getConnection(): Server = selector.select()
 
     fun returnConnection(server: Server?) {
         if (server == null) {
@@ -113,9 +121,7 @@ class CDNClientPool(
             return
         }
 
-        logger?.debug("Returning connection: $server")
-
-        // (SK) nothing to do, maybe remove from ContentServerPenalty?
+        selector.succeeded(server)
     }
 
     fun returnBrokenConnection(server: Server?) {
@@ -124,15 +130,6 @@ class CDNClientPool(
             return
         }
 
-        logger?.debug("Returning broken connection: $server")
-
-        val servers = servers.get()
-        val currentIndex = nextServer.get()
-
-        if (servers.isNotEmpty() && servers[currentIndex % servers.size] == server) {
-            nextServer.incrementAndGet()
-
-            // TODO: (SK) Add server to ContentServerPenalty
-        }
+        selector.failed(server)
     }
 }

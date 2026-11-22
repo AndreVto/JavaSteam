@@ -463,7 +463,9 @@ class DepotDownloader @JvmOverloads constructor(
         var depotManifestIds = depotManifestIds.toMutableList()
 
         val steamUser = requireNotNull(steam3!!.steamUser)
-        cdnClientPool = CDNClientPool(steam3!!, appId, scope, debug)
+        cdnClientPool = CDNClientPool(
+            steam3!!, appId, scope, debug, preferredHostCount = (maxDownloads / 2).coerceIn(1, 8),
+        )
 
         // Load our configuration data containing the depots currently installed
         var configPath = config.installPath
@@ -926,7 +928,7 @@ class DepotDownloader @JvmOverloads constructor(
     }
 
     private suspend fun downloadSteam3(mainAppId: Int, depots: List<DepotDownloadInfo>): Unit = coroutineScope {
-        cdnClientPool?.updateServerList(maxDownloads)
+        cdnClientPool?.updateServerList(maxOf(16, maxDownloads))
 
         val downloadCounter = GlobalDownloadCounter()
         val depotsToDownload = ArrayList<DepotFilesData>(depots.size)
@@ -1118,7 +1120,11 @@ class DepotDownloader @JvmOverloads constructor(
                             continue
                         }
 
-                        cdnClientPool!!.returnBrokenConnection(connection)
+                        if (e.statusCode == 401 || e.statusCode == 403) {
+                            cdnClientPool!!.returnConnection(connection)
+                        } else {
+                            cdnClientPool!!.returnBrokenConnection(connection)
+                        }
 
                         // Unauthorized || Forbidden
                         if (e.statusCode == 401 || e.statusCode == 403) {
@@ -1559,7 +1565,11 @@ class DepotDownloader @JvmOverloads constructor(
                     continue
                 }
 
-                cdnClientPool!!.returnBrokenConnection(connection)
+                if (e.statusCode == 401 || e.statusCode == 403) {
+                    cdnClientPool!!.returnConnection(connection)
+                } else {
+                    cdnClientPool!!.returnBrokenConnection(connection)
+                }
 
                 // Unauthorized || Forbidden
                 if (e.statusCode == 401 || e.statusCode == 403) {
